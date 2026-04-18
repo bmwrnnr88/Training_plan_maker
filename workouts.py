@@ -233,3 +233,5 @@ def build_progression_session(
     if band == 110:
         return f"8 x 200m @ 110% / full recovery"
     return f"Short fast relaxed reps around {band}% effort"
+
+long_run_description = get_long_run_description
