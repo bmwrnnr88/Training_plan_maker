@@ -281,6 +281,42 @@ def get_long_run_description(
         return f"{long_run_miles} mi with last 20–30 min steady to strong"
     return f"{max(long_run_miles - 1, 6)} to {long_run_miles} mi mostly easy, keep fresh for workouts"
 
+def long_run_description(
+    race_distance: str,
+    event_category: str,
+    paces: dict,
+    long_run_miles: int,
+    phase: str,
+) -> str:
+    """
+    Simple long-run formatter used by planner.py.
+    """
+
+    def pace(band: int) -> str:
+        return paces[band]["pace_per_mile"]
+
+    if event_category == "middle_distance":
+        return f"{long_run_miles} mi easy with 6 x 20 sec relaxed fast strides"
+
+    if race_distance == "marathon":
+        if phase == "general":
+            return f"{long_run_miles} mi easy"
+        if phase == "supportive":
+            return f"{long_run_miles} mi with last 25–40 min around 90% ({pace(90)}/mi)"
+        return f"{max(long_run_miles - 2, 8)}–{long_run_miles} mi mostly easy, stay fresh for key workouts"
+
+    if race_distance == "half_marathon":
+        if phase == "general":
+            return f"{long_run_miles} mi easy, optionally finishing moderate"
+        if phase == "supportive":
+            return f"{long_run_miles} mi with last 20–30 min around 90% ({pace(90)}/mi)"
+        return f"{max(long_run_miles - 1, 8)}–{long_run_miles} mi mostly easy, keep the quality for workout days"
+
+    if phase == "general":
+        return f"{long_run_miles} mi easy, optionally finishing moderate"
+    if phase == "supportive":
+        return f"{long_run_miles} mi with last 15–25 min around 85% ({pace(85)}/mi)"
+    return f"{max(long_run_miles - 1, 7)}–{long_run_miles} mi mostly easy, keep fresh for race-specific sessions"
 
 def easy_run_description(miles: int, include_strides: bool = False) -> str:
     session = f"{miles} mi easy"
