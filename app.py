@@ -1,6 +1,10 @@
-
 import streamlit as st
-from planner import AthleteProfile, GoalProfile, build_training_plan
+from planner import (
+    AthleteProfile,
+    GoalProfile,
+    build_training_plan,
+    apply_manual_fitness_override,
+)
 
 st.set_page_config(page_title="Full-Spectrum Running Planner", layout="wide")
 
@@ -54,6 +58,32 @@ with st.sidebar:
     track_access = st.checkbox("Track access", value=True)
     treadmill_access = st.checkbox("Treadmill access", value=True)
 
+    st.divider()
+    st.subheader("Manual Fitness Override")
+
+    use_override = st.checkbox("Use manual fitness override", value=False)
+
+    override_distance = st.selectbox(
+        "Override distance",
+        ["800m", "1500m", "mile", "3k", "5k", "10k", "half_marathon", "marathon"],
+        index=4,
+        disabled=not use_override,
+    )
+
+    override_time = st.text_input(
+        "Override time (mm:ss or hh:mm:ss)",
+        value="17:30",
+        disabled=not use_override,
+    )
+
+    rebuild_start_week = st.slider(
+        "Rebuild from week",
+        min_value=1,
+        max_value=weeks_to_race,
+        value=1,
+        disabled=not use_override,
+    )
+
     build_clicked = st.button("Build plan", type="primary")
 
 if build_clicked:
@@ -79,9 +109,21 @@ if build_clicked:
 
     plan = build_training_plan(athlete, goal)
 
+    if use_override:
+        plan = apply_manual_fitness_override(
+            existing_plan=plan,
+            athlete=athlete,
+            goal=goal,
+            override_distance=override_distance,
+            override_time=override_time,
+            rebuild_start_week=rebuild_start_week,
+        )
+
     st.subheader("Plan Summary")
     st.write(f"**Target race:** {plan['summary']['race_distance']}")
-    st.write(f"**Current fitness anchor:** {plan['summary']['fitness_anchor']}")
+    st.write(f"**Base fitness anchor:** {plan['summary']['fitness_anchor']}")
+    if plan["summary"].get("override_applied"):
+        st.write(f"**Manual override:** {plan['summary']['override_applied']}")
     st.write(f"**Phase structure:** {plan['summary']['phase_structure']}")
     st.write(f"**Peak mileage:** {plan['summary']['peak_mileage']} mi/week")
 
@@ -94,7 +136,12 @@ if build_clicked:
 
     st.subheader("Weekly Plan")
     for week in plan["weeks"]:
-        with st.expander(f"Week {week['week_number']} — {week['phase']} ({week['target_mileage']} mi)"):
+        label = f"Week {week['week_number']} — {week['phase']} ({week['target_mileage']} mi)"
+        if week.get("reanchored"):
+            label += " [Re-anchored]"
+        with st.expander(label):
+            if week.get("fitness_anchor_used"):
+                st.write(f"**Fitness anchor used:** {week['fitness_anchor_used']}")
             for day in week["days"]:
                 st.write(f"**{day['day']}**: {day['session']}")
             st.write("**Why this week looks like this:**")
