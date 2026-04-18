@@ -1,40 +1,34 @@
----
-
-## `paces.py`
-
-```python
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict
 
 
-SUPPORTED_DISTANCES_M = {
-    "800m": 800.0,
-    "1500m": 1500.0,
-    "mile": 1609.344,
-    "3000m": 3000.0,
-    "5k": 5000.0,
-    "10k": 10000.0,
-    "half marathon": 21097.5,
-    "marathon": 42195.0,
+DISTANCE_KM = {
+    "800m": 0.8,
+    "1500m": 1.5,
+    "mile": 1.60934,
+    "3k": 3.0,
+    "5k": 5.0,
+    "10k": 10.0,
+    "half_marathon": 21.0975,
+    "marathon": 42.195,
 }
-
 
 PACE_BANDS = [80, 85, 90, 95, 100, 105, 110, 115]
 
 
 @dataclass
-class PaceBand:
-    percent: int
+class PaceInfo:
+    distance: str
+    time_seconds: float
     seconds_per_km: float
     seconds_per_mile: float
-    label: str
 
 
 def parse_time_to_seconds(time_str: str) -> int:
     """
-    Accepts 'MM:SS' or 'H:MM:SS'.
+    Supports mm:ss or hh:mm:ss.
     """
     parts = time_str.strip().split(":")
     if len(parts) == 2:
@@ -43,10 +37,10 @@ def parse_time_to_seconds(time_str: str) -> int:
     if len(parts) == 3:
         hours, minutes, seconds = parts
         return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
-    raise ValueError("Time must look like MM:SS or H:MM:SS")
+    raise ValueError("Time must be in mm:ss or hh:mm:ss format.")
 
 
-def format_seconds_to_clock(total_seconds: float) -> str:
+def seconds_to_clock(total_seconds: float) -> str:
     total_seconds = int(round(total_seconds))
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
@@ -57,84 +51,82 @@ def format_seconds_to_clock(total_seconds: float) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-def format_pace(seconds: float) -> str:
-    minutes = int(seconds // 60)
-    sec = int(round(seconds % 60))
-    if sec == 60:
+def pace_to_string(seconds_per_unit: float) -> str:
+    minutes = int(seconds_per_unit // 60)
+    seconds = int(round(seconds_per_unit % 60))
+    if seconds == 60:
         minutes += 1
-        sec = 0
-    return f"{minutes}:{sec:02d}"
+        seconds = 0
+    return f"{minutes}:{seconds:02d}"
 
 
-def race_time_to_base_pace(distance_name: str, race_time_str: str) -> Dict[str, float]:
-    if distance_name not in SUPPORTED_DISTANCES_M:
-        raise ValueError(f"Unsupported distance: {distance_name}")
+def race_time_to_pace_info(distance: str, time_str: str) -> PaceInfo:
+    if distance not in DISTANCE_KM:
+        raise ValueError(f"Unsupported distance: {distance}")
 
-    total_seconds = parse_time_to_seconds(race_time_str)
-    meters = SUPPORTED_DISTANCES_M[distance_name]
+    time_seconds = parse_time_to_seconds(time_str)
+    km = DISTANCE_KM[distance]
+    sec_per_km = time_seconds / km
+    sec_per_mile = sec_per_km * 1.60934
 
-    seconds_per_meter = total_seconds / meters
-    seconds_per_km = seconds_per_meter * 1000.0
-    seconds_per_mile = seconds_per_meter * 1609.344
-
-    return {
-        "race_time_seconds": total_seconds,
-        "distance_m": meters,
-        "seconds_per_meter": seconds_per_meter,
-        "seconds_per_km": seconds_per_km,
-        "seconds_per_mile": seconds_per_mile,
-    }
+    return PaceInfo(
+        distance=distance,
+        time_seconds=time_seconds,
+        seconds_per_km=sec_per_km,
+        seconds_per_mile=sec_per_mile,
+    )
 
 
-def build_percentage_paces(distance_name: str, race_time_str: str) -> Dict[int, PaceBand]:
+def equivalent_time(target_distance: str, source_distance: str, source_time_seconds: float) -> float:
     """
-    In this framework, 100% = current race pace.
-    Faster percentages have lower seconds-per-distance.
-    Example: 105% pace means moving 5% faster than race pace.
+    Very simple Riegel-style fallback. This is just a backup when the user's
+    current mark is from a different distance.
     """
-    base = race_time_to_base_pace(distance_name, race_time_str)
-    base_km = base["seconds_per_km"]
-    base_mile = base["seconds_per_mile"]
+    if source_distance == target_distance:
+        return source_time_seconds
 
-    labels = {
-        80: "general endurance floor",
-        85: "steady / supportive endurance bridge",
-        90: "race-supportive endurance",
-        95: "race-specific endurance",
-        100: "race pace",
-        105: "race-specific speed",
-        110: "race-supportive speed",
-        115: "mechanical / fast support",
-    }
+    d1 = DISTANCE_KM[source_distance]
+    d2 = DISTANCE_KM[target_distance]
+    exponent = 1.06
+    return source_time_seconds * (d2 / d1) ** exponent
 
-    paces: Dict[int, PaceBand] = {}
+
+def get_target_pace_info(
+    target_distance: str,
+    current_distance: str,
+    current_time_str: str,
+) -> PaceInfo:
+    source = race_time_to_pace_info(current_distance, current_time_str)
+    target_time = equivalent_time(target_distance, current_distance, source.time_seconds)
+    sec_per_km = target_time / DISTANCE_KM[target_distance]
+    sec_per_mile = sec_per_km * 1.60934
+
+    return PaceInfo(
+        distance=target_distance,
+        time_seconds=target_time,
+        seconds_per_km=sec_per_km,
+        seconds_per_mile=sec_per_mile,
+    )
+
+
+def get_percentage_paces(target_pace_info: PaceInfo) -> Dict[int, Dict[str, float | str]]:
+    """
+    In percentage-based training, 100% is race pace.
+    Faster bands have LOWER seconds per mile/km.
+    So pace seconds are divided by band fraction.
+    """
+    paces: Dict[int, Dict[str, float | str]] = {}
+
     for pct in PACE_BANDS:
-        factor = 100.0 / pct
-        paces[pct] = PaceBand(
-            percent=pct,
-            seconds_per_km=base_km * factor,
-            seconds_per_mile=base_mile * factor,
-            label=labels[pct],
-        )
-    return paces
+        frac = pct / 100.0
+        sec_per_km = target_pace_info.seconds_per_km / frac
+        sec_per_mile = target_pace_info.seconds_per_mile / frac
 
-
-def pace_table_for_display(distance_name: str, race_time_str: str) -> Dict[str, Dict[str, str]]:
-    bands = build_percentage_paces(distance_name, race_time_str)
-    output: Dict[str, Dict[str, str]] = {}
-    for pct, band in bands.items():
-        output[f"{pct}%"] = {
-            "label": band.label,
-            "per_km": format_pace(band.seconds_per_km),
-            "per_mile": format_pace(band.seconds_per_mile),
+        paces[pct] = {
+            "seconds_per_km": sec_per_km,
+            "seconds_per_mile": sec_per_mile,
+            "pace_per_km": pace_to_string(sec_per_km),
+            "pace_per_mile": pace_to_string(sec_per_mile),
         }
-    return output
 
-
-def convert_distance_for_repetition(distance_name: str) -> Tuple[str, str]:
-    """
-    Convenience helper for workout display.
-    """
-    if distance_name in {"800m", "1500m", "mile", "3000m"}:
-        return ("track", "meters")
-    return ("road", "mixed")
+    return paces
