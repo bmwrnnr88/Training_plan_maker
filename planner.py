@@ -78,11 +78,6 @@ def _build_key_session_maps(
     paces: Dict[int, Dict[str, str]],
     phases: List[str],
 ) -> Dict[int, Dict[str, Optional[str]]]:
-    """
-    For each week number, define:
-    - primary key session
-    - secondary key session
-    """
     event = goal.race_distance
     if event not in FINAL_TARGETS:
         raise ValueError(f"No FINAL_TARGETS entry found for {event} in workouts.py")
