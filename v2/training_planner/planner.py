@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from capacity import target_equivalent_from_capacity
+from config import PHASE_QUOTAS_5K
 from history import days_since_percent, get_recent_sessions, recent_best_equivalent
 from load_model import classify_load
 from models import PercentWorkout, Phase, PlannerResult, SessionRecord
@@ -294,12 +295,34 @@ def generate_next_workout(
         history=history,
         readiness=readiness,
     )
-    workout_result = select_workout_template(
-        percent=selected_percent,
-        phase=phase,
-        capacities=capacities,
-        history=history,
-        readiness=readiness,
-    )
-    workout_result.reason_summary = f"{percent_reason}; {workout_result.reason_summary}"
-    return workout_result
+    fallback_percents = [selected_percent] + [
+        percent
+        for percent in sorted(
+            PHASE_QUOTAS_5K[phase],
+            key=lambda percent: (abs(percent - selected_percent), -percent),
+        )
+        if percent != selected_percent
+    ]
+
+    for percent in fallback_percents:
+        try:
+            workout_result = select_workout_template(
+                percent=percent,
+                phase=phase,
+                capacities=capacities,
+                history=history,
+                readiness=readiness,
+            )
+        except ValueError:
+            continue
+
+        if percent != selected_percent:
+            workout_result.reason_summary = (
+                f"{percent_reason}; shifted from {selected_percent}% to {percent}% because no template met the current gates; "
+                f"{workout_result.reason_summary}"
+            )
+        else:
+            workout_result.reason_summary = f"{percent_reason}; {workout_result.reason_summary}"
+        return workout_result
+
+    raise ValueError(f"No workout templates are available in {phase} for the current readiness/capacity gates.")

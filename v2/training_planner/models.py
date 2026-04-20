@@ -16,6 +16,8 @@ BuildDirection = Literal[
 ]
 MechanicalFlag = Literal["low", "medium", "high"]
 LoadClass = Literal["easy", "moderate", "hard", "very_hard"]
+ScheduleStatus = Literal["planned", "completed", "partial", "missed"]
+ScheduleType = Literal["quality", "support", "long_support", "recovery", "easy", "off"]
 
 
 @dataclass(frozen=True)
@@ -62,3 +64,19 @@ class PlannerResult:
     load_class: LoadClass
     reason_summary: str
     notes: Optional[str] = None
+
+
+@dataclass
+class ScheduleEntry:
+    date: str
+    day_label: str
+    session_type: ScheduleType
+    primary_percent: Optional[int]
+    secondary_percents: List[int]
+    workout_text: str
+    equivalent_volume_m: int
+    load_estimate: float
+    load_class: LoadClass
+    reason_summary: str
+    status: ScheduleStatus = "planned"
+    completion_ratio: float = 1.0

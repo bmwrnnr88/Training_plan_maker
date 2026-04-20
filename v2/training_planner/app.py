@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, timedelta
+import os
 from typing import Dict, List
 
 import pandas as pd
@@ -8,10 +10,12 @@ import streamlit as st
 
 from capacity import normalize_capacity
 from config import PEAK_EQUIVALENTS_5K
+from intervals_icu import IntervalsImportResult, import_recent_history
 from load_model import classify_load
-from models import PlannerResult, SessionRecord
+from models import PlannerResult, ScheduleEntry, SessionRecord
 from paces import get_percentage_paces
 from planner import generate_next_workout
+from schedule import generate_two_week_schedule
 from utils import (
     capacity_table,
     format_equivalent_volume,
@@ -106,6 +110,26 @@ def _history_records_from_editor(history_df: pd.DataFrame) -> List[SessionRecord
     return records
 
 
+def _merge_history_rows(
+    existing_rows: List[dict],
+    imported_rows: List[dict],
+    replace_existing: bool,
+) -> List[dict]:
+    if replace_existing:
+        return imported_rows
+
+    merged: List[dict] = []
+    seen = set()
+    for row in imported_rows + existing_rows:
+        key = (str(row.get("date", "")), str(row.get("workout_text", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    merged.sort(key=lambda row: str(row.get("date", "")), reverse=True)
+    return merged
+
+
 def _render_result(result: PlannerResult) -> None:
     st.subheader("Next Workout")
     st.markdown(f"**Primary percent:** {format_percent(result.selected_percent)}")
@@ -131,6 +155,82 @@ def _pace_ladder_df(paces: Dict[int, Dict[str, float | str]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _default_intervals_api_key() -> str:
+    """Load the Intervals.icu key from env or Streamlit secrets when available."""
+    env_value = os.environ.get("INTERVALS_ICU_API_KEY", "").strip()
+    if env_value:
+        return env_value
+    try:
+        secret_value = str(st.secrets.get("INTERVALS_ICU_API_KEY", "")).strip()
+    except Exception:
+        secret_value = ""
+    return secret_value
+
+
+def _schedule_rows_for_editor(entries: List[ScheduleEntry]) -> List[dict]:
+    rows = []
+    for entry in entries:
+        row = asdict(entry)
+        row["secondary_percents"] = ", ".join(str(percent) for percent in entry.secondary_percents)
+        rows.append(row)
+    return rows
+
+
+def _schedule_entries_from_editor(schedule_df: pd.DataFrame) -> List[ScheduleEntry]:
+    entries: List[ScheduleEntry] = []
+    for row in schedule_df.fillna("").to_dict(orient="records"):
+        date_value = str(row.get("date", "")).strip()
+        workout_text = str(row.get("workout_text", "")).strip()
+        session_type = str(row.get("session_type", "off")).strip() or "off"
+        if not date_value or not workout_text:
+            continue
+
+        primary_raw = row.get("primary_percent", "")
+        try:
+            primary_percent = int(primary_raw) if str(primary_raw).strip() else None
+        except (TypeError, ValueError):
+            primary_percent = None
+
+        try:
+            equivalent_volume_m = int(float(row.get("equivalent_volume_m", 0)))
+            load_estimate = float(row.get("load_estimate", 0.0))
+            completion_ratio = float(row.get("completion_ratio", 1.0))
+        except (TypeError, ValueError):
+            continue
+
+        entries.append(
+            ScheduleEntry(
+                date=date_value,
+                day_label=str(row.get("day_label", "")).strip() or date_value,
+                session_type=session_type,  # type: ignore[arg-type]
+                primary_percent=primary_percent,
+                secondary_percents=_parse_secondary_percents(str(row.get("secondary_percents", ""))),
+                workout_text=workout_text,
+                equivalent_volume_m=equivalent_volume_m,
+                load_estimate=load_estimate,
+                load_class=str(row.get("load_class", "easy")) or "easy",
+                reason_summary=str(row.get("reason_summary", "")).strip(),
+                status=str(row.get("status", "planned")) or "planned",
+                completion_ratio=completion_ratio,
+            )
+        )
+    return entries
+
+
+def _import_preview_df(import_result: IntervalsImportResult) -> pd.DataFrame:
+    preview_rows = [
+        {
+            "Date": row["date"],
+            "Primary %": format_percent(int(row["primary_percent"])),
+            "Workout": row["workout_text"],
+            "Equivalent": format_equivalent_volume(int(row["equivalent_volume_m"])),
+            "Load": f"{float(row['load_score']):.1f}",
+        }
+        for row in import_result.imported_rows
+    ]
+    return pd.DataFrame(preview_rows)
+
+
 def main() -> None:
     """Render the Streamlit percentage-based 5K planner."""
     st.set_page_config(page_title="Percentage-Based 5K Planner", layout="wide")
@@ -139,6 +239,10 @@ def main() -> None:
 
     if "history_rows" not in st.session_state:
         st.session_state["history_rows"] = _default_history_rows()
+    if "schedule_rows" not in st.session_state:
+        st.session_state["schedule_rows"] = []
+    if "last_intervals_import" not in st.session_state:
+        st.session_state["last_intervals_import"] = None
 
     col_left, col_right = st.columns([1, 1])
 
@@ -156,6 +260,73 @@ def main() -> None:
             pace_ladder = get_percentage_paces(current_5k_time)
         except ValueError as exc:
             st.warning(f"Pace ladder unavailable: {exc}")
+
+        with st.expander("Intervals.icu Import", expanded=False):
+            st.caption(
+                "Imports recent completed run activities using your personal API key and maps them"
+                " into editable planner history rows."
+            )
+            intervals_api_key = st.text_input(
+                "Intervals.icu API key",
+                type="password",
+                value=_default_intervals_api_key(),
+            )
+            athlete_id = st.number_input(
+                "Athlete ID (0 uses the athlete tied to the API key)",
+                min_value=0,
+                value=0,
+                step=1,
+            )
+            import_days = st.slider("Days of recent history to import", min_value=7, max_value=42, value=21)
+            replace_history = st.checkbox("Replace current history editor with imported rows", value=False)
+            if st.button("Import Recent Intervals.icu Activities", use_container_width=True):
+                if not intervals_api_key:
+                    st.warning("Enter your Intervals.icu API key first.")
+                else:
+                    try:
+                        import_result = import_recent_history(
+                            api_key=intervals_api_key,
+                            athlete_id=int(athlete_id),
+                            days=import_days,
+                            current_5k_time=current_5k_time,
+                        )
+                    except ValueError as exc:
+                        st.session_state["last_intervals_import"] = None
+                        st.error(str(exc))
+                    else:
+                        imported_rows = import_result.imported_rows
+                        st.session_state["history_rows"] = _merge_history_rows(
+                            existing_rows=st.session_state["history_rows"],
+                            imported_rows=imported_rows,
+                            replace_existing=replace_history,
+                        )
+                        st.session_state["last_intervals_import"] = import_result
+                        if imported_rows:
+                            st.success(f"Imported {len(imported_rows)} recent run activities.")
+                        else:
+                            st.warning(
+                                "No recent run activities were imported. The recent Intervals.icu entries looked"
+                                " like notes, calendar items, non-run sessions, or activities missing the fields"
+                                " needed for mapping."
+                            )
+
+            last_import = st.session_state.get("last_intervals_import")
+            if last_import is not None:
+                st.caption(
+                    "Import summary:"
+                    f" scanned {last_import.scanned_entries} recent entries,"
+                    f" found {last_import.candidate_activities} completed activities,"
+                    f" imported {len(last_import.imported_rows)} runs,"
+                    f" skipped {last_import.skipped_note_entries} note/calendar entries,"
+                    f" {last_import.skipped_non_runs} non-run activities,"
+                    f" and {last_import.skipped_missing_fields} activities with missing fields."
+                )
+                if last_import.imported_rows:
+                    st.dataframe(
+                        _import_preview_df(last_import),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         st.markdown("**Current Completed Equivalent by Percent**")
         st.caption(
@@ -267,30 +438,6 @@ def main() -> None:
 
     history_records = _history_records_from_editor(edited_history)
 
-    if st.button("Generate Next Workout", type="primary", use_container_width=True):
-        try:
-            result = generate_next_workout(
-                phase=phase,
-                capacities=capacities,
-                history=history_records,
-                readiness=readiness,
-            )
-            _render_result(result)
-            if pace_ladder is not None:
-                st.markdown(
-                    f"**Primary percent pace:** {pace_ladder[result.selected_percent]['pace_per_mile']}/mi"
-                    f" | {pace_ladder[result.selected_percent]['pace_per_km']}/km"
-                )
-                if result.secondary_percents:
-                    secondary_paces = ", ".join(
-                        f"{format_percent(percent)} = {pace_ladder[percent]['pace_per_mile']}/mi"
-                        f" ({pace_ladder[percent]['pace_per_km']}/km)"
-                        for percent in result.secondary_percents
-                    )
-                    st.markdown(f"**Secondary percent paces:** {secondary_paces}")
-        except ValueError as exc:
-            st.error(str(exc))
-
     if history_records:
         st.markdown("---")
         st.subheader("History Snapshot")
@@ -302,6 +449,84 @@ def main() -> None:
             latest_session.workout_text,
             f"({classify_load(latest_session.load_score)})",
         )
+
+    st.markdown("---")
+    st.subheader("Rolling 2-Week Schedule")
+    st.caption(
+        "Build a rolling 14-day schedule, then mark sessions as completed, partial, or missed."
+        " Refreshing the schedule folds the logged outcomes back into planner history."
+    )
+
+    schedule_df = pd.DataFrame(st.session_state["schedule_rows"])
+    current_schedule_entries: List[ScheduleEntry] = []
+    if not schedule_df.empty:
+        edited_schedule = st.data_editor(
+            schedule_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "date": st.column_config.TextColumn("Date", disabled=True),
+                "day_label": st.column_config.TextColumn("Day", disabled=True),
+                "session_type": st.column_config.TextColumn("Session type", disabled=True),
+                "primary_percent": st.column_config.NumberColumn("Primary %", disabled=True),
+                "secondary_percents": st.column_config.TextColumn("Secondary %", disabled=True),
+                "workout_text": st.column_config.TextColumn("Session", disabled=True, width="large"),
+                "equivalent_volume_m": st.column_config.NumberColumn("Eq. m", disabled=True),
+                "load_estimate": st.column_config.NumberColumn("Load", disabled=True, format="%.1f"),
+                "load_class": st.column_config.TextColumn("Load class", disabled=True),
+                "reason_summary": st.column_config.TextColumn("Why", disabled=True, width="large"),
+                "status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=["planned", "completed", "partial", "missed"],
+                ),
+                "completion_ratio": st.column_config.NumberColumn(
+                    "Completion",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.1,
+                    format="%.1f",
+                ),
+            },
+        )
+        st.session_state["schedule_rows"] = edited_schedule.to_dict(orient="records")
+        current_schedule_entries = _schedule_entries_from_editor(edited_schedule)
+
+        first_quality = next(
+            (entry for entry in current_schedule_entries if entry.session_type == "quality"),
+            None,
+        )
+        if first_quality is not None:
+            next_workout_result = PlannerResult(
+                selected_percent=first_quality.primary_percent or 80,
+                selected_workout_id="schedule_preview",
+                workout_text=first_quality.workout_text,
+                secondary_percents=first_quality.secondary_percents,
+                load_estimate=first_quality.load_estimate,
+                load_class=first_quality.load_class,
+                reason_summary=first_quality.reason_summary,
+            )
+            _render_result(next_workout_result)
+            if pace_ladder is not None and first_quality.primary_percent is not None:
+                st.markdown(
+                    f"**Primary percent pace:** {pace_ladder[first_quality.primary_percent]['pace_per_mile']}/mi"
+                    f" | {pace_ladder[first_quality.primary_percent]['pace_per_km']}/km"
+                )
+
+    if st.button("Build / Refresh 2-Week Schedule", type="primary", use_container_width=True):
+        try:
+            schedule_entries = generate_two_week_schedule(
+                phase=phase,
+                capacities=capacities,
+                history=history_records,
+                readiness=readiness,
+                pace_ladder=pace_ladder,
+                existing_entries=current_schedule_entries,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["schedule_rows"] = _schedule_rows_for_editor(schedule_entries)
+            st.success("Built a refreshed 2-week schedule. Update statuses and refresh again as training happens.")
 
 
 if __name__ == "__main__":
