@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Dict
 
+from workout_evolution_system.event_profiles import progression_paths
 from workout_evolution_system.utils import clamp, meters_to_miles, round_to_half_mile, seconds_to_clock
 
 
@@ -21,12 +22,6 @@ DEFAULT_REST_MULTIPLIERS = {
     "vo2": 1.0,
     "speed": 3.0,
 }
-
-RACE_DISTANCE_STEPS = [1000, 1200, 1609, 2000]
-CV_DISTANCE_STEPS = [600, 800, 1000]
-SPEED_REP_TARGETS = {110: 12, 115: 10}
-ENDURANCE_TARGETS = {80: 14.0, 85: 12.0, 90: 10.0, 95: 8.0}
-
 
 def _rest_family_for_band(band: int) -> str:
     if band == 95:
@@ -88,315 +83,137 @@ def describe_workout(state: Dict[str, object], ladder: Dict[int, Dict[str, float
 
 
 def progress_ratio_for_band(state: Dict[str, object]) -> float:
-    band = int(state["band"])
-    current = state["current"]
-    workout_type = current["type"]
+    return clamp(_state_progress_value(state), 0.0, 1.0)
 
-    if band in ENDURANCE_TARGETS:
-        target = ENDURANCE_TARGETS[band]
-        if workout_type == "broken_tempo":
-            return 1.0
-        return clamp(float(current.get("distance_miles", 0.0)) / target, 0.0, 1.0)
 
-    if band == 100:
-        if workout_type == "continuous":
-            return clamp(0.85 + ((float(current.get("distance_miles", 3.0)) - 3.0) / 2.0) * 0.15, 0.0, 1.0)
+def progress_ratio_to_peak(
+    state: Dict[str, object],
+    peak_state: Dict[str, object],
+) -> float:
+    peak_value = max(0.01, _state_progress_value(peak_state))
+    return clamp(_state_progress_value(state) / peak_value, 0.0, 1.0)
 
-        reps = int(current.get("reps", 0))
-        distance_m = int(current.get("distance_m", 1000))
-        distance_index = RACE_DISTANCE_STEPS.index(_nearest_step(distance_m, RACE_DISTANCE_STEPS))
-        step_progress = distance_index / (len(RACE_DISTANCE_STEPS) - 1)
-        rep_progress = clamp(reps / 6.0, 0.0, 1.0)
-        return clamp((step_progress * 0.65) + (rep_progress * 0.35), 0.0, 0.95)
 
-    if band == 105:
-        reps = int(current.get("reps", 0))
-        distance_m = int(current.get("distance_m", 600))
-        distance_index = CV_DISTANCE_STEPS.index(_nearest_step(distance_m, CV_DISTANCE_STEPS))
-        distance_progress = distance_index / (len(CV_DISTANCE_STEPS) - 1)
-        rep_progress = clamp(reps / 8.0, 0.0, 1.0)
-        rest_progress = 0.0
-        if distance_index == len(CV_DISTANCE_STEPS) - 1:
-            rest_sec = int(current.get("rest_sec", 300))
-            rest_progress = clamp((300 - rest_sec) / 270.0, 0.0, 1.0)
-        return clamp((distance_progress * 0.45) + (rep_progress * 0.4) + (rest_progress * 0.15), 0.0, 1.0)
-
-    if band in SPEED_REP_TARGETS:
-        reps = int(current.get("reps", 0))
-        return clamp(reps / SPEED_REP_TARGETS[band], 0.0, 1.0)
-
-    return 0.0
+def progress_value_to_peak(
+    state: Dict[str, object],
+    peak_state: Dict[str, object],
+) -> float:
+    peak_value = max(0.01, _state_progress_value(peak_state))
+    return _state_progress_value(state) / peak_value
 
 
 def next_progression_for_band(
     state: Dict[str, object],
     ladder: Dict[int, Dict[str, float | str]],
+    goal_event: str,
+    allow_extension: bool = False,
 ) -> Dict[str, object]:
     band = int(state["band"])
-    current = state["current"]
+    path = progression_paths(goal_event, ladder)[band]
+    current_index = _nearest_progression_index(state, path)
 
-    if band in {80, 85, 90, 95}:
-        return _progress_endurance_band(state, ladder)
-    if band == 100:
-        return _progress_race_band(state, ladder)
-    if band == 105:
-        return _progress_cv_band(state, ladder)
-    return _progress_speed_band(state, ladder)
+    if current_index < len(path) - 1:
+        next_state = deepcopy(state)
+        next_state["current"] = deepcopy(path[current_index + 1])
+        return {
+            "state": next_state,
+            "changed": True,
+            "reason": "Next step progresses toward the appendix peak workout for this goal race.",
+        }
+
+    if not allow_extension:
+        peak_state = deepcopy(state)
+        peak_state["current"] = deepcopy(path[-1])
+        return {
+            "state": peak_state,
+            "changed": False,
+            "reason": "This band is already at the current peak target for the selected goal race.",
+        }
+
+    extended_state = deepcopy(state)
+    extended_state["current"] = _extend_beyond_peak(path[-1], band)
+    return {
+        "state": extended_state,
+        "changed": True,
+        "reason": "Peak target reached; extension keeps the pace fixed and grows continuity or duration.",
+    }
 
 
-def _progress_endurance_band(
-    state: Dict[str, object],
+def peak_state_for_band(
+    goal_event: str,
+    band: int,
     ladder: Dict[int, Dict[str, float | str]],
 ) -> Dict[str, object]:
-    band = int(state["band"])
-    current = deepcopy(state["current"])
-    target = ENDURANCE_TARGETS[band]
-
-    if current["type"] == "broken_tempo":
-        return {
-            "state": deepcopy(state),
-            "changed": False,
-            "reason": "This band is already at its broken-tempo cap.",
-        }
-
-    current_distance = float(current.get("distance_miles", 0.0))
-
-    if band == 95 and current_distance >= 8.0:
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "broken_tempo",
-            "reps": 2,
-            "distance_miles": 4.0,
-            "rest_sec": recommend_rest_seconds(
-                band=95,
-                work_duration_seconds=ladder[95]["seconds_per_mile"] * 4.0,
-            ),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "Threshold work capped at 8 continuous miles, so the next step is a broken tempo.",
-        }
-
-    if band == 90 and current_distance >= target:
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "broken_tempo",
-            "reps": 2,
-            "distance_miles": 5.0,
-            "rest_sec": recommend_rest_seconds(
-                band=90,
-                work_duration_seconds=ladder[90]["seconds_per_mile"] * 5.0,
-            ),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "Supportive endurance has hit its continuous cap, so the next step is a broken steady session.",
-        }
-
-    if current_distance >= target:
-        return {
-            "state": deepcopy(state),
-            "changed": False,
-            "reason": "This band is already at its current continuous target.",
-        }
-
-    next_state = deepcopy(state)
-    next_distance = min(target, current_distance + 1.0)
-    next_state["current"] = {
-        "type": "continuous",
-        "distance_miles": next_distance,
-    }
-
+    peak_current = deepcopy(progression_paths(goal_event, ladder)[band][-1])
     return {
-        "state": next_state,
-        "changed": True,
-        "reason": "Progression comes from extending the continuous run by one mile.",
-    }
-
-
-def _progress_race_band(
-    state: Dict[str, object],
-    ladder: Dict[int, Dict[str, float | str]],
-) -> Dict[str, object]:
-    current = deepcopy(state["current"])
-
-    if current["type"] == "continuous":
-        current_distance = float(current.get("distance_miles", 3.0))
-        if current_distance >= 5.0:
-            return {
-                "state": deepcopy(state),
-                "changed": False,
-                "reason": "Race-pace work is already at the 5-mile continuous cap.",
-            }
-
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "continuous",
-            "distance_miles": min(5.0, current_distance + 1.0),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "The next step is more continuity at race pace.",
-        }
-
-    reps = int(current.get("reps", 4))
-    distance_m = _nearest_step(int(current.get("distance_m", 1000)), RACE_DISTANCE_STEPS)
-
-    if reps < 6:
-        next_reps = reps + 1
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "interval",
-            "reps": next_reps,
-            "distance_m": distance_m,
-            "rest_sec": recommend_rest_seconds(
-                band=100,
-                work_duration_seconds=ladder[100]["seconds_per_mile"] * meters_to_miles(distance_m),
-            ),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "Race-pace progression adds reps until six are in place.",
-        }
-
-    distance_index = RACE_DISTANCE_STEPS.index(distance_m)
-    if distance_index < len(RACE_DISTANCE_STEPS) - 1:
-        next_distance = RACE_DISTANCE_STEPS[distance_index + 1]
-        next_reps = 5 if next_distance <= 1200 else 4
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "interval",
-            "reps": next_reps,
-            "distance_m": next_distance,
-            "rest_sec": recommend_rest_seconds(
-                band=100,
-                work_duration_seconds=ladder[100]["seconds_per_mile"] * meters_to_miles(next_distance),
-            ),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "Race-pace progression now extends rep length: 1000m -> 1200m -> mile -> 2k.",
-        }
-
-    next_state = deepcopy(state)
-    next_state["current"] = {
-        "type": "continuous",
-        "distance_miles": 3.0,
-    }
-    return {
-        "state": next_state,
-        "changed": True,
-        "reason": "Once the interval ladder reaches 2k reps, the next step is continuous race-pace work.",
-    }
-
-
-def _progress_cv_band(
-    state: Dict[str, object],
-    ladder: Dict[int, Dict[str, float | str]],
-) -> Dict[str, object]:
-    current = deepcopy(state["current"])
-    reps = int(current.get("reps", 6))
-    distance_m = _nearest_step(int(current.get("distance_m", 600)), CV_DISTANCE_STEPS)
-    rest_sec = int(current.get("rest_sec", 0)) or recommend_rest_seconds(
-        band=105,
-        work_duration_seconds=ladder[105]["seconds_per_mile"] * meters_to_miles(distance_m),
-    )
-
-    if reps < 8:
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "interval",
-            "reps": reps + 1,
-            "distance_m": distance_m,
-            "rest_sec": rest_sec,
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "CV progression adds reps first, up to eight.",
-        }
-
-    distance_index = CV_DISTANCE_STEPS.index(distance_m)
-    if distance_index < len(CV_DISTANCE_STEPS) - 1:
-        next_distance = CV_DISTANCE_STEPS[distance_index + 1]
-        next_state = deepcopy(state)
-        next_state["current"] = {
-            "type": "interval",
-            "reps": 6,
-            "distance_m": next_distance,
-            "rest_sec": recommend_rest_seconds(
-                band=105,
-                work_duration_seconds=ladder[105]["seconds_per_mile"] * meters_to_miles(next_distance),
-            ),
-        }
-        return {
-            "state": next_state,
-            "changed": True,
-            "reason": "After eight reps, CV progression lengthens the rep: 600m -> 800m -> 1k.",
-        }
-
-    next_rest = max(30, rest_sec - 15)
-    if next_rest == rest_sec:
-        return {
-            "state": deepcopy(state),
-            "changed": False,
-            "reason": "CV work is already at the minimum rest floor.",
-        }
-
-    next_state = deepcopy(state)
-    next_state["current"] = {
-        "type": "interval",
-        "reps": reps,
-        "distance_m": distance_m,
-        "rest_sec": next_rest,
-    }
-    return {
-        "state": next_state,
-        "changed": True,
-        "reason": "Once reps and rep length are built, CV progression tightens density by trimming rest.",
-    }
-
-
-def _progress_speed_band(
-    state: Dict[str, object],
-    ladder: Dict[int, Dict[str, float | str]],
-) -> Dict[str, object]:
-    band = int(state["band"])
-    current = deepcopy(state["current"])
-    reps = int(current.get("reps", 0))
-    distance_m = int(current.get("distance_m", 200))
-    target_reps = SPEED_REP_TARGETS[band]
-    rest_sec = recommend_rest_seconds(
-        band=band,
-        work_duration_seconds=ladder[band]["seconds_per_mile"] * meters_to_miles(distance_m),
-    )
-
-    next_state = deepcopy(state)
-    next_state["current"] = {
-        "type": "interval",
-        "reps": min(target_reps, reps + 1),
-        "distance_m": distance_m,
-        "rest_sec": rest_sec,
-    }
-
-    if reps >= target_reps:
-        return {
-            "state": next_state,
-            "changed": False,
-            "reason": "Speed work is already at the current rep target; keep full recovery and stay interval-based.",
-        }
-
-    return {
-        "state": next_state,
-        "changed": True,
-        "reason": "Speed progression only adds reps and keeps full recovery; it never converts to continuous running.",
+        "band": band,
+        "pace": ladder[band]["pace_per_mile"],
+        "zone": str(ladder[band]["zone"]),
+        "current": peak_current,
     }
 
 
 def _nearest_step(value: int, steps: list[int]) -> int:
     return min(steps, key=lambda step: abs(step - value))
+
+
+def _state_progress_value(state: Dict[str, object]) -> float:
+    current = state["current"]
+    workout_type = current["type"]
+    value = workout_volume_miles(state)
+
+    if workout_type == "continuous":
+        value += 0.45
+        value += float(current.get("distance_miles", 0.0)) * 0.04
+        return value
+
+    if workout_type == "broken_tempo":
+        value += 0.3
+        value += float(current.get("distance_miles", 0.0)) * 0.03
+        return value
+
+    rep_distance_m = int(current.get("distance_m", 0))
+    rep_miles = meters_to_miles(rep_distance_m)
+    reps = int(current.get("reps", 0))
+    rest_sec = int(current.get("rest_sec", 60))
+    density_bonus = clamp(180 / max(rest_sec, 30), 0.7, 1.25)
+    return value + (rep_miles * 0.4) + (reps * 0.03) + ((density_bonus - 1.0) * 0.35)
+
+
+def _nearest_progression_index(state: Dict[str, object], path: list[Dict[str, object]]) -> int:
+    state_value = _state_progress_value(state)
+    path_values = [_state_progress_value({"band": state["band"], "current": step}) for step in path]
+
+    best_index = 0
+    for i, value in enumerate(path_values):
+        if state_value >= value * 0.98:
+            best_index = i
+
+    return best_index
+
+
+def _extend_beyond_peak(peak_current: Dict[str, object], band: int) -> Dict[str, object]:
+    current = deepcopy(peak_current)
+
+    if current["type"] == "continuous":
+        current["distance_miles"] = round_to_half_mile(float(current.get("distance_miles", 0.0)) + 1.0)
+        return current
+
+    if current["type"] == "broken_tempo":
+        current["distance_miles"] = round_to_half_mile(float(current.get("distance_miles", 0.0)) + 0.5)
+        return current
+
+    if band == 100:
+        current["type"] = "continuous"
+        current.pop("reps", None)
+        current.pop("distance_m", None)
+        current.pop("rest_sec", None)
+        current["distance_miles"] = max(3.0, round_to_half_mile(workout_volume_miles({"band": band, "current": peak_current}) * 0.65))
+        return current
+
+    if band in {105, 110, 115}:
+        current["reps"] = int(current.get("reps", 0)) + (2 if band >= 110 else 1)
+        return current
+
+    current["distance_miles"] = round_to_half_mile(float(current.get("distance_miles", 0.0)) + 1.0)
+    return current
