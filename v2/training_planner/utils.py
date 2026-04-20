@@ -4,7 +4,7 @@ from typing import Dict, Iterable, List
 
 import pandas as pd
 
-from config import PEAK_EQUIVALENTS_5K
+from config import ARTICLE_PEAK_TARGETS_5K, PEAK_EQUIVALENTS_5K
 from models import PercentWorkout
 from workouts_5k import WORKOUT_DB_5K
 
@@ -95,14 +95,8 @@ def _best_by_style(workouts: Iterable[PercentWorkout]) -> List[dict]:
 
 
 def peak_workout_references(percent: int) -> Dict[str, List[dict]]:
-    """Return peak targets, peak-building routes, and blend/support references."""
+    """Return article peak targets, peak-building routes, and blend/support references."""
     candidates = [workout for workout in WORKOUT_DB_5K if workout.primary_percent == percent]
-
-    peak_targets = [
-        workout
-        for workout in candidates
-        if workout.build_direction in {"single_percent", "maintenance"}
-    ]
     peak_builders = [
         workout
         for workout in candidates
@@ -115,7 +109,7 @@ def peak_workout_references(percent: int) -> Dict[str, List[dict]]:
     ]
 
     return {
-        "peak_targets": _best_by_style(peak_targets),
+        "peak_targets": ARTICLE_PEAK_TARGETS_5K[percent],
         "peak_builders": _best_by_style(peak_builders),
         "blend_support": _best_by_style(blend_support),
     }
