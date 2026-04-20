@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 PEAK_EQUIVALENTS_5K = {
-    80: 24140,   # 15 mi
-    85: 14484,   # 9 mi
+    80: 16093,   # 10 mi
+    85: 8045,    # 5 mi
     90: 11265,   # 7 mi
-    95: 10000,   # high-end 95% support ceiling
+    95: 9100,    # 35 min split 95%
     100: 7200,   # 6 x 1200
     105: 6000,   # 2 x (6 x 500)
     110: 3200,   # 16 x 200
-    115: 2400,   # 12 x 200
+    115: 800,    # 8 x 100m strides / fast relaxed sprints
 }
 
 PHASE_QUOTAS_5K = {

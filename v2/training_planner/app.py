@@ -205,16 +205,28 @@ def main() -> None:
 
         with st.expander("Peak Workout References", expanded=False):
             st.caption(
-                "These are the reference peak workouts for each rung. When a rung has multiple workout styles,"
-                " the app shows separate peak references and still uses equivalent volume as the common currency."
+                "Peak means the actual peak workout target at that rung. Top-down, bottom-up, and alternation"
+                " are routes toward that peak. Blends are connector workouts that link adjacent stimuli and"
+                " support specific work, not separate peak definitions."
             )
             for percent in PERCENT_RUNG_ORDER:
+                references = peak_workout_references(percent)
                 st.markdown(
-                    f"**{format_percent(percent)} internal peak:** {format_equivalent_volume(PEAK_EQUIVALENTS_5K[percent])}"
+                    f"**{format_percent(percent)} peak:** {format_equivalent_volume(PEAK_EQUIVALENTS_5K[percent])}"
                 )
-                for reference in peak_workout_references(percent):
+                for reference in references["peak_targets"]:
                     st.markdown(
-                        f"- `{reference['style']}`: {reference['workout_text']} "
+                        f"- `Peak target · {reference['style']}`: {reference['workout_text']} "
+                        f"({format_equivalent_volume(reference['equivalent_volume_m'])})"
+                    )
+                for reference in references["peak_builders"]:
+                    st.markdown(
+                        f"- `Build toward peak · {reference['style']}`: {reference['workout_text']} "
+                        f"({format_equivalent_volume(reference['equivalent_volume_m'])})"
+                    )
+                for reference in references["blend_support"]:
+                    st.markdown(
+                        f"- `Blend support · {reference['style']}`: {reference['workout_text']} "
                         f"({format_equivalent_volume(reference['equivalent_volume_m'])})"
                     )
 

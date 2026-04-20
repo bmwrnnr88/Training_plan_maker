@@ -70,20 +70,17 @@ def workout_style_label(workout: PercentWorkout) -> str:
     return workout.build_direction.replace("_", " ").title()
 
 
-def peak_workout_references(percent: int) -> List[dict]:
-    """Return representative peak workout references for a rung by style."""
-    candidates = [
-        workout for workout in WORKOUT_DB_5K if workout.primary_percent == percent
-    ]
+def _best_by_style(workouts: Iterable[PercentWorkout]) -> List[dict]:
+    """Return the highest-equivalent workout for each display style."""
     best_by_style: Dict[str, PercentWorkout] = {}
 
-    for workout in candidates:
+    for workout in workouts:
         style = workout_style_label(workout)
         current_best = best_by_style.get(style)
         if current_best is None or workout.equivalent_volume_m > current_best.equivalent_volume_m:
             best_by_style[style] = workout
 
-    references = [
+    return [
         {
             "style": style,
             "workout_text": workout.workout_text,
@@ -95,7 +92,33 @@ def peak_workout_references(percent: int) -> List[dict]:
             reverse=True,
         )
     ]
-    return references
+
+
+def peak_workout_references(percent: int) -> Dict[str, List[dict]]:
+    """Return peak targets, peak-building routes, and blend/support references."""
+    candidates = [workout for workout in WORKOUT_DB_5K if workout.primary_percent == percent]
+
+    peak_targets = [
+        workout
+        for workout in candidates
+        if workout.build_direction in {"single_percent", "maintenance"}
+    ]
+    peak_builders = [
+        workout
+        for workout in candidates
+        if workout.build_direction in {"top_down", "bottom_up", "alternation"}
+    ]
+    blend_support = [
+        workout
+        for workout in candidates
+        if workout.build_direction in {"blend", "combo"}
+    ]
+
+    return {
+        "peak_targets": _best_by_style(peak_targets),
+        "peak_builders": _best_by_style(peak_builders),
+        "blend_support": _best_by_style(blend_support),
+    }
 
 
 def capacity_table(completed_equivalents_m: Dict[int, int], capacities: Dict[int, float]) -> pd.DataFrame:
