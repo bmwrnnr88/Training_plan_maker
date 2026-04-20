@@ -4,7 +4,6 @@ from dataclasses import asdict
 from datetime import date, timedelta
 import os
 from typing import Dict, List
-
 import pandas as pd
 import streamlit as st
 
@@ -271,12 +270,10 @@ def main() -> None:
                 type="password",
                 value=_default_intervals_api_key(),
             )
-            athlete_id = st.number_input(
-                "Athlete ID (0 uses the athlete tied to the API key)",
-                min_value=0,
-                value=0,
-                step=1,
-            )
+            athlete_id = st.text_input(
+                "Athlete ID (leave blank to use the athlete tied to the API key)",
+                value="",
+            ).strip()
             import_days = st.slider("Days of recent history to import", min_value=7, max_value=42, value=21)
             replace_history = st.checkbox("Replace current history editor with imported rows", value=False)
             if st.button("Import Recent Intervals.icu Activities", use_container_width=True):
@@ -286,7 +283,7 @@ def main() -> None:
                     try:
                         import_result = import_recent_history(
                             api_key=intervals_api_key,
-                            athlete_id=int(athlete_id),
+                            athlete_id=athlete_id or None,
                             days=import_days,
                             current_5k_time=current_5k_time,
                         )
